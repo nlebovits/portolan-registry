@@ -32,6 +32,10 @@ New catalogs must pass deterministic validation before they enter the registry. 
 
 After your submission passes validation and a maintainer merges it, the registry publishes its metadata in [`exports/catalogs.json`](./exports/catalogs.json). Your catalog then appears on the registry page. Scheduled checks revisit registered catalogs and notify submitters about failures.
 
+Each night, the registry checks catalog metadata with `rashid` and `stac-node-validator`. If a catalog you registered fails validation, the Monday check includes it in a weekly email with the failed rules and examples. You receive one email for all your catalogs that fail that check. When a catalog passes validation, the emails stop including it. Validation errors leave your catalog listed with status `valid`, unless it is deprecated.
+
+In the [JSON registry](./exports/catalogs.json), `portolan_registry:stac_valid` records the validation result. The `portolan_registry:stac_invalid_since` field records when the registry first detected the current failure. A passing check sets `portolan_registry:stac_valid` to `true` and clears the failure timestamp.
+
 Your catalog's registry ID is its filename without `.yaml`, such as `city-of-example-parcels`. Use lowercase letters and digits, with single hyphens between groups. Once a maintainer merges your submission, you cannot change the ID or reuse it for another catalog. The registry reads the title from your catalog, so the ID does not need to match the title.
 
 ## Remove or deprecate a catalog

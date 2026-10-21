@@ -264,19 +264,61 @@ def settle_stac_valid(
     entry now names another URL, because the old answer is about another
     catalog.
     """
-    if result["validation"]["stac_valid"] is not None or not previous_link:
+    link = _same_catalog(url, previous_link)
+    if result["validation"]["stac_valid"] is not None or link is None:
         return
-    href = previous_link.get("href")
-    if not href or normalize_url(href) != normalize_url(url):
-        return
-    previous = previous_link.get("portolan_registry:stac_valid")
+    previous = link.get("portolan_registry:stac_valid")
     if isinstance(previous, bool):
         log(f"  Note: no validator answer this run, so stac_valid stays {previous}")
         result["validation"]["stac_valid"] = previous
 
 
+def _same_catalog(url: str, previous_link: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    """Return the previous link if its normalized URL matches `url`, or `None`."""
+    href = (previous_link or {}).get("href")
+    if not href or normalize_url(href) != normalize_url(url):
+        return None
+    return previous_link
+
+
+def settle_stac_invalid_since(
+    result: CrawlResult,
+    passed: bool | None,
+    url: str,
+    previous_link: Mapping[str, Any] | None,
+    *,
+    now: datetime,
+) -> bool:
+    """Record when the registry first detected the current validation failure.
+
+    Pass this run's `report.passed` as `passed`. The settled `stac_valid`
+    can contain an earlier result when this run has no validation result.
+
+    A pass clears the timestamp. Otherwise, keep the published timestamp.
+    If validation fails and no timestamp exists, use `now`.
+
+    Reuse a timestamp only when the previous link has the same normalized
+    URL. Return `True` when this run records a new failure timestamp.
+    """
+    link = _same_catalog(url, previous_link) or {}
+    previous = link.get("portolan_registry:stac_invalid_since")
+    started = passed is False and previous is None
+    if passed is True:
+        since = None
+    elif started:
+        since = now.isoformat()
+    else:
+        since = previous
+    result["validation"]["stac_invalid_since"] = since
+    return started
+
+
 def log_validation(report: ValidationReport) -> None:
-    """Report what the validators found. Status does not depend on it yet."""
+    """Report what the validators found.
+
+    Validation errors affect status only for deprecated catalogs. See
+    `registry.status.passes`.
+    """
     if report.error:
         log(f"  Validators could not run: {report.error}")
     elif report.groups:

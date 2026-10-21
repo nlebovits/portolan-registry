@@ -6,6 +6,12 @@ a passing check. A passing check restores `valid`. Checks fail when a catalog
 cannot be fetched. For deprecated catalogs, validator errors also count as
 failures. See `registry.status.passes`.
 
+For catalogs that are not deprecated, validation errors leave the status
+unchanged. The run records the first detection of each failure in
+`portolan_registry:stac_invalid_since` and logs new failures. On
+`DIGEST_WEEKDAY`, each submitter receives one email listing their catalogs
+with validation errors.
+
     uv run --frozen scripts/revalidate_all.py
     uv run --frozen scripts/revalidate_all.py --no-notify --output -
 """
@@ -43,13 +49,19 @@ from registry.export import (
 )
 from registry.fetch import HttpFetcher
 from registry.history import first_registered
-from registry.notify import send_stale_notification
+from registry.notify import (
+    DIGEST_WEEKDAY,
+    FailingCatalog,
+    send_stale_notification,
+    send_validation_failure_notification,
+)
 from registry.report import log
 from registry.status import passes, update_status
 from registry.validators import (
     ValidationReport,
     crawl_and_validate,
     log_validation,
+    settle_stac_invalid_since,
     settle_stac_valid,
 )
 
@@ -62,6 +74,17 @@ def validation_failure(report: ValidationReport) -> str:
     """
     rules = ", ".join(f"{g.tool} {g.rule_id}" for g in report.groups)
     return f"Deprecated catalog failed validation: {rules}"
+
+
+def send_validation_digest(
+    failing: list[tuple[str | None, FailingCatalog]], *, enabled: bool
+) -> None:
+    """Group catalogs by submitter and send one validation email to each."""
+    by_submitter: dict[str | None, list[FailingCatalog]] = {}
+    for submitter_email, catalog in failing:
+        by_submitter.setdefault(submitter_email, []).append(catalog)
+    for submitter_email, failing_catalogs in by_submitter.items():
+        send_validation_failure_notification(submitter_email, failing_catalogs, enabled=enabled)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -87,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
     previous_links = load_links(EXPORT_PATH)
 
     newly_stale: list[tuple[str, dict[str, Any], str, Deprecation]] = []
+    failing: list[tuple[str | None, FailingCatalog]] = []
+    newly_failing: list[str] = []
     crawled: dict[str, CrawlResult] = {}
 
     for path in paths:
@@ -139,6 +164,25 @@ def main(argv: list[str] | None = None) -> int:
 
         log_validation(report)
         settle_stac_valid(result, url, previous_links.get(catalog_id))
+        if settle_stac_invalid_since(
+            result, report.passed, url, previous_links.get(catalog_id), now=now
+        ):
+            rules = ", ".join(f"{g.tool} {g.rule_id}" for g in report.groups)
+            newly_failing.append(f"{catalog_id}: {rules}")
+        # Deprecated catalogs receive a stale notification instead.
+        if report.passed is False and not state_of_entry.deprecated:
+            failing.append(
+                (
+                    entry.get("submitter_email"),
+                    FailingCatalog(
+                        catalog_id,
+                        url,
+                        report.groups,
+                        result["validation"]["stac_invalid_since"],
+                        result.get("title"),
+                    ),
+                )
+            )
         result["id"] = catalog_id
         # A shallow clone cannot see the add commit. Keep the date already
         # published rather than moving the catalog's registration to today.
@@ -173,6 +217,15 @@ def main(argv: list[str] | None = None) -> int:
                 superseded_by=state_of_entry.superseded_by,
                 enabled=not args.no_notify,
             )
+
+    if newly_failing:
+        log(f"\n=== New validation failures: {len(newly_failing)} ===")
+        for line in newly_failing:
+            log(f"  {line}")
+
+    if failing and now.weekday() == DIGEST_WEEKDAY:
+        log(f"\n=== Weekly validation emails: {len(failing)} catalogs with errors ===")
+        send_validation_digest(failing, enabled=not args.no_notify)
 
     catalogs = []
     for catalog_id, result in crawled.items():
@@ -214,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
                 # signal. Null is what it publishes for a validation that
                 # never ran.
                 "portolan_registry:stac_valid": None,
+                "portolan_registry:stac_invalid_since": None,
                 "portolan_registry:has_agents_md": False,
                 "portolan_registry:has_readme": False,
                 # Never crawled, so no providers were read. Null and empty

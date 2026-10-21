@@ -70,6 +70,8 @@ CARRIED_DEFAULTS: dict[str, object] = {
     PREFIX + "producers": [],
     PREFIX + "processors": [],
     PREFIX + "host": None,
+    # For older links, record the timestamp when a run next detects a failure.
+    PREFIX + "stac_invalid_since": None,
 }
 
 
@@ -223,6 +225,9 @@ def child_link(catalog: Mapping[str, Any]) -> dict[str, Any]:
             # metadata tree (registry.validators). Null when the validators
             # did not run or could not finish.
             "portolan_registry:stac_valid": validation.get("stac_valid"),
+            # First detection of the current validation failure, set by
+            # registry.validators.settle_stac_invalid_since.
+            "portolan_registry:stac_invalid_since": validation.get("stac_invalid_since"),
             # Whether the root catalog links the two Markdown documents the
             # specification requires of it, AGENTS.md and README.md.
             "portolan_registry:has_agents_md": validation.get("has_agents_md", False),

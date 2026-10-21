@@ -1,8 +1,8 @@
-"""Email the submitter when a catalog becomes stale or receives an issue.
+"""Email the submitter when a catalog becomes stale, fails validation, or receives an issue.
 
-Notifications cover unreachable catalogs, feedback reports, and removal
-requests. Each uses `submitter_email` from the entry file so the registry can
-contact the submitter even when the catalog is unreachable.
+Notifications cover unreachable catalogs, validation errors, feedback reports,
+and removal requests. Each uses `submitter_email` from the entry file so the
+registry can contact the submitter even when the catalog is unreachable.
 
 The export uses crawl results rather than entry files and excludes this
 email address.
@@ -13,12 +13,19 @@ titles, and form answers, before inserting it into HTML.
 
 from __future__ import annotations
 
+import calendar
 import html
 import os
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import requests
 
 from registry.report import log
+
+if TYPE_CHECKING:
+    from registry.validators import RuleGroup
 
 RESEND_ENDPOINT = "https://api.resend.com/emails"
 FROM_ADDRESS = "Portolan Registry <registry@portolan-sdi.org>"
@@ -69,6 +76,82 @@ def _stale_body(
         <p><strong>Catalog URL:</strong> <a href="{url}">{url}</a></p>
         <p><strong>Reason:</strong> {failure_reason}</p>
         {outcome}
+        {FOOTER}
+    """
+
+
+# Send weekly validation emails on Monday (0 in `datetime.weekday`).
+DIGEST_WEEKDAY = 0
+
+
+@dataclass(frozen=True)
+class FailingCatalog:
+    """A catalog with validation errors to include in the weekly email.
+
+    `since` holds the published `portolan_registry:stac_invalid_since` timestamp.
+    """
+
+    catalog_id: str
+    url: str
+    groups: Sequence[RuleGroup]
+    since: str
+    title: str | None = None
+
+
+def _rule_items(groups: Sequence[RuleGroup]) -> str:
+    items = []
+    for g in groups:
+        noun = "finding" if g.count == 1 else "findings"
+        examples = [f"<li><code>{html.escape(e)}</code></li>" for e in g.examples]
+        if g.count > len(g.examples):
+            examples.append(f"<li>{g.count - len(g.examples)} additional findings</li>")
+        items.append(
+            f"<li><code>{html.escape(g.tool)}</code> <code>{html.escape(g.rule_id)}</code> "
+            f"({g.count} {noun}): {html.escape(g.description)}"
+            f"<ul>{''.join(examples)}</ul></li>"
+        )
+    return f"<ul>{''.join(items)}</ul>"
+
+
+def _validation_failure_body(catalogs: Sequence[FailingCatalog]) -> str:
+    sections = []
+    for c in catalogs:
+        title, url = html.escape(c.title or c.catalog_id), html.escape(c.url)
+        sections.append(
+            f"<h3>{title}</h3>"
+            f'<p><strong>Catalog URL:</strong> <a href="{url}">{url}</a><br>'
+            f"<strong>Failure first detected:</strong> {html.escape(c.since[:10])}</p>"
+            f"{_rule_items(c.groups)}"
+        )
+    lead = (
+        "a catalog that you registered"
+        if len(catalogs) == 1
+        else f"{len(catalogs)} catalogs that you registered"
+    )
+    day = calendar.day_name[DIGEST_WEEKDAY]
+    return f"""
+        <h2>Catalog validation failed</h2>
+        <p>The nightly registry check found validation errors in {lead}.
+        <code>rashid</code> checks the Portolan requirements, and
+        <code>stac-node-validator</code> checks the STAC schemas.</p>
+        {"".join(sections)}
+        <p>These validation errors leave your catalogs listed with status
+        <code>valid</code>. In the registry export,
+        <code>portolan_registry:stac_valid</code> is <code>false</code>.</p>
+        <p>To investigate the errors, run these checks. Replace
+        <code>&lt;catalog URL&gt;</code> with your published catalog URL and
+        <code>&lt;catalog folder&gt;</code> with the path to your local catalog copy.
+        Use a folder for <code>stac-node-validator</code> to include nested metadata.</p>
+        <pre>rashid check --no-data --no-live --schema &lt;catalog URL&gt;
+npx stac-node-validator --depth -1 &lt;catalog folder&gt;</pre>
+        <p>After you fix the errors, publish your updated catalog. The next passing
+        nightly check clears the failure timestamp and sets
+        <code>portolan_registry:stac_valid</code> to <code>true</code>.
+        For help with the errors, see the
+        <a href="https://github.com/portolan-sdi/rashid">rashid documentation</a> and
+        <a href="https://github.com/m-mohr/stac-node-validator">stac-node-validator documentation</a>.</p>
+        <p>Each {day}, the registry sends you one email listing your catalogs that
+        fail that check. Catalogs that pass validation no longer appear in the email.</p>
         {FOOTER}
     """
 
@@ -217,6 +300,34 @@ def send_stale_notification(
             deprecated=deprecated,
             superseded_by=superseded_by,
         ),
+        enabled=enabled,
+    )
+
+
+def send_validation_failure_notification(
+    submitter_email: str | None,
+    catalogs: Sequence[FailingCatalog],
+    *,
+    enabled: bool = True,
+) -> bool:
+    """Email a submitter the validation errors for their catalogs.
+
+    The nightly run calls this on `DIGEST_WEEKDAY` for catalogs that are not
+    deprecated. Grouping all of a submitter's catalogs into one weekly email
+    limits repeated notifications and reduces the number of emails sent.
+    Return `True` if the email was sent.
+    """
+    subject = (
+        f"[Portolan Registry] Catalog validation failed: "
+        f"{catalogs[0].title or catalogs[0].catalog_id}"
+        if len(catalogs) == 1
+        else f"[Portolan Registry] Validation failed for {len(catalogs)} catalogs"
+    )
+    return _send(
+        ", ".join(c.catalog_id for c in catalogs),
+        submitter_email=submitter_email,
+        subject=subject,
+        body=_validation_failure_body(catalogs),
         enabled=enabled,
     )
 
