@@ -21,6 +21,20 @@
     }
   },
   "$defs": {
+    "party": {
+      "description": "One organization a catalog names, trimmed to what identifies it. The provider's own description is left in the catalog.",
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "url": {
+          "description": "The party's own URL, as the catalog declares it. Absent when it declares none, which the specification permits for a producer.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
     "bbox": {
       "description": "WGS84 bounding box, [west, south, east, north] or [west, south, min_alt, east, north, max_alt]. Range and ordering rules beyond arity are checked in the test suite.",
       "type": "array",
@@ -55,7 +69,11 @@
               "portolan_registry:deprecated",
               "portolan_registry:deprecated_since",
               "portolan_registry:deprecated_reason",
-              "portolan_registry:superseded_by"
+              "portolan_registry:superseded_by",
+              "portolan_registry:kind",
+              "portolan_registry:producers",
+              "portolan_registry:processors",
+              "portolan_registry:host"
             ],
             "description": "Closed on purpose. The export is the registry's published contract and its sole store of validation state, so a field the crawler stopped writing, or one a carried-forward link never gained, has to fail this check rather than ride along unnoticed. An allOf branch reads its own properties only, so the STAC link fields are declared again here.",
             "additionalProperties": false,
@@ -120,6 +138,25 @@
               "portolan_registry:first_registered": {
                 "description": "When the entry file was added to this registry, RFC 3339.",
                 "type": ["string", "null"]
+              },
+              "portolan_registry:kind": {
+                "description": "Whether this catalog is the canonical home of its data or a cloud-native copy of a source maintained elsewhere. Derived, never declared: the specification defines the kind as a reading of a collection's providers and gives it no property of its own (portolan-spec core.md, Source Provenance). The registry applies rashid's rule to each collection: official when a producer carries the host's name, compared without case, and a mirror otherwise. A catalog reads as official when every collection that has a kind is official, and as a mirror when any is a mirror. A catalog's own providers take no part, because the specification makes the collection-level declaration authoritative. Null when no collection names a producer and exactly one named host, so the registry cannot say.",
+                "type": ["string", "null"],
+                "enum": ["official", "mirror", null]
+              },
+              "portolan_registry:producers": {
+                "description": "Who made the data, from the providers of every collection, in crawl order. Repeats are dropped, compared on the name without case. Two organizations that share a URL host both stay on the list. Empty when no collection names a producer.",
+                "type": "array",
+                "items": {"$ref": "#/$defs/party"}
+              },
+              "portolan_registry:processors": {
+                "description": "Who derived this copy from the source, from the providers of every collection, in crawl order. Repeats are dropped, compared on the name without case. On a mirror this is usually the party that built the mirror. Empty when no collection names a processor.",
+                "type": "array",
+                "items": {"$ref": "#/$defs/party"}
+              },
+              "portolan_registry:host": {
+                "description": "Who serves this copy, and the party a reader contacts about it. The first host the crawl reads among the collections, since the specification allows one host per collection. Null when no collection names one.",
+                "oneOf": [{"$ref": "#/$defs/party"}, {"type": "null"}]
               },
               "portolan_registry:collection_count": {"type": "integer", "minimum": 0},
               "portolan_registry:feature_count": {"type": "integer", "minimum": 0},
