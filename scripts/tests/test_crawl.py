@@ -107,6 +107,54 @@ class TestAggregation:
         assert by_id["inland"].row_count == 300
 
 
+class TestProvenance:
+    """The kind and the parties, derived over the whole merged tree.
+
+    The nested fixture is a mirror: coastal and inland each name a producer
+    of their own and the same host, and alpine names no providers at all.
+    """
+
+    def test_reads_the_kind_over_every_collection(self, tree):
+        result = crawl_catalog(ROOT, tree)
+        assert result["kind"] == "mirror"
+
+    def test_names_the_producers_of_a_nested_catalog(self, tree):
+        # inland sits under the sub-catalog. A derivation done one level at a
+        # time would miss it, the way the license mix once did.
+        result = crawl_catalog(ROOT, tree)
+        assert [p["name"] for p in result["producers"]] == [
+            "Coastal Authority",
+            "Inland Agency",
+        ]
+
+    def test_names_the_host(self, tree):
+        assert crawl_catalog(ROOT, tree)["host"] == {
+            "name": "Example Host",
+            "url": "https://host.example/",
+        }
+
+    def test_ignores_the_providers_of_the_root_catalog(self, tree):
+        # The spec makes the collection-level declaration authoritative, and
+        # rashid reads collections alone. A root that claims to produce and
+        # host everything changes nothing.
+        tree.docs[ROOT]["providers"] = [
+            {"name": "Root Claimant", "roles": ["producer", "host"], "url": "https://root.example/"}
+        ]
+        result = crawl_catalog(ROOT, tree)
+        assert result["kind"] == "mirror"
+        assert [p["name"] for p in result["producers"]] == [
+            "Coastal Authority",
+            "Inland Agency",
+        ]
+        assert result["host"] == {"name": "Example Host", "url": "https://host.example/"}
+
+    def test_a_catalog_declaring_no_providers_reports_no_kind(self, unmeasured):
+        result = crawl_catalog(ROOT, unmeasured)
+        assert result["kind"] is None
+        assert result["producers"] == []
+        assert result["host"] is None
+
+
 class TestItemCount:
     """Counting items must stay free.
 
@@ -295,6 +343,113 @@ class TestDegenerateCollections:
     def test_unfetchable_root_raises(self):
         with pytest.raises(NotFound):
             crawl_catalog(ROOT, FakeFetcher(), now=FROZEN)
+
+
+def interval(start, end):
+    return collection(extent={"temporal": {"interval": [[start, end]]}})
+
+
+def two_collections(a, b):
+    return FakeFetcher(
+        docs={
+            ROOT: catalog("./a/collection.json", "./b/collection.json"),
+            "https://ex.org/a/collection.json": a,
+            "https://ex.org/b/collection.json": b,
+        }
+    )
+
+
+class TestTemporalExtent:
+    def test_an_open_end_stays_open_beside_a_closed_one(self):
+        # TriMet's district-boundary declares [2013-01-09, null]. A closed
+        # sibling must not close it.
+        f = two_collections(
+            interval("2013-01-09T00:00:00Z", None),
+            interval("2020-01-01T00:00:00Z", "2023-06-30T00:00:00Z"),
+        )
+        assert crawl_catalog(ROOT, f, now=FROZEN)["temporal_extent"] == [
+            "2013-01-09T00:00:00Z",
+            None,
+        ]
+
+    def test_an_open_start_stays_open_beside_a_closed_one(self):
+        f = two_collections(
+            interval(None, "2020-01-01T00:00:00Z"),
+            interval("2015-01-01T00:00:00Z", "2023-06-30T00:00:00Z"),
+        )
+        assert crawl_catalog(ROOT, f, now=FROZEN)["temporal_extent"] == [
+            None,
+            "2023-06-30T00:00:00Z",
+        ]
+
+    def test_endpoints_compare_as_instants_and_keep_their_spelling(self):
+        # 2020-01-01T01:00:00+02:00 is 2019-12-31T23:00:00Z, so it starts
+        # earlier, although it sorts later as a string.
+        f = two_collections(
+            interval("2020-01-01T01:00:00+02:00", "2021-01-01T00:00:00Z"),
+            interval("2019-12-31T23:30:00Z", "2021-01-01T00:30:00+01:00"),
+        )
+        assert crawl_catalog(ROOT, f, now=FROZEN)["temporal_extent"] == [
+            "2020-01-01T01:00:00+02:00",
+            "2021-01-01T00:00:00Z",
+        ]
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            ["2020-01-01", "2021-01-01T00:00:00Z"],
+            ["2020-01-01T00:00:00", "2021-01-01T00:00:00Z"],
+            ["2020-13-01T00:00:00Z", "2021-01-01T00:00:00Z"],
+            ["2020-01-01T00:00:00Z"],
+            [2020, 2021],
+        ],
+    )
+    def test_an_invalid_interval_takes_no_part(self, bad, capsys):
+        f = two_collections(
+            collection(extent={"temporal": {"interval": [bad]}}),
+            interval("2015-01-01T00:00:00Z", "2016-01-01T00:00:00Z"),
+        )
+        r = crawl_catalog(ROOT, f, now=FROZEN)
+        assert r["collection_count"] == 2
+        assert r["temporal_extent"] == ["2015-01-01T00:00:00Z", "2016-01-01T00:00:00Z"]
+        assert "discarding invalid temporal extent" in capsys.readouterr().err
+
+    def test_a_null_null_interval_takes_no_part(self, capsys):
+        # berlin-geoportal writes [null, null] on 370 of 371 collections. As
+        # an open interval it would hide the one collection's 1990 dates.
+        f = two_collections(
+            interval(None, None),
+            interval("1990-01-01T00:00:00Z", "1990-12-31T23:59:59Z"),
+        )
+        assert crawl_catalog(ROOT, f, now=FROZEN)["temporal_extent"] == [
+            "1990-01-01T00:00:00Z",
+            "1990-12-31T23:59:59Z",
+        ]
+        assert "temporal extent" not in capsys.readouterr().err
+
+    def test_null_when_every_interval_is_null_null(self):
+        f = two_collections(interval(None, None), interval(None, None))
+        assert crawl_catalog(ROOT, f, now=FROZEN)["temporal_extent"] is None
+
+    def test_null_when_no_collection_declares_an_interval(self):
+        f = two_collections(collection(), collection(extent={"temporal": {}}))
+        assert crawl_catalog(ROOT, f, now=FROZEN)["temporal_extent"] is None
+
+    def test_a_sub_catalogs_open_end_reaches_the_root(self):
+        f = FakeFetcher(
+            docs={
+                ROOT: catalog("./sub/catalog.json", "./a/collection.json"),
+                "https://ex.org/sub/catalog.json": catalog("./b/collection.json"),
+                "https://ex.org/sub/b/collection.json": interval("2018-01-01T00:00:00Z", None),
+                "https://ex.org/a/collection.json": interval(
+                    "2010-01-01T00:00:00Z", "2012-01-01T00:00:00Z"
+                ),
+            }
+        )
+        assert crawl_catalog(ROOT, f, now=FROZEN)["temporal_extent"] == [
+            "2010-01-01T00:00:00Z",
+            None,
+        ]
 
 
 class TestCycles:
